@@ -1,644 +1,399 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import "./index.css";
-
-/* ====== Leaflet (React-Leaflet + Vite) ====== */
-import "leaflet/dist/leaflet.css";
-
+import { useCallback, useRef, useState } from "react";
 import {
-  MapContainer,
-  TileLayer,
+  useJsApiLoader,
+  GoogleMap,
+  Autocomplete,
   Marker,
-  Polyline,
-  Popup,
-  useMap,
-} from "react-leaflet";
+  DirectionsRenderer,
+} from "@react-google-maps/api";
+import DatePicker from "react-datepicker";
+import "react-datepicker/dist/react-datepicker.css";
 
-// Importar Leaflet como espacio de nombres (valor) + tipos aparte
-import * as L from "leaflet";
-import type { LeafletMouseEvent, LatLngExpression } from "leaflet";
+type VehicleKey = "moto" | "camioneta" | "camion";
+type LatLng = { lat: number; lng: number };
+type RouteInfo = { distanceText?: string; durationText?: string };
 
-// Importar assets como módulos para que Vite los resuelva en build
-import marker2xUrl from "leaflet/dist/images/marker-icon-2x.png";
-import marker1xUrl from "leaflet/dist/images/marker-icon.png";
-import markerShadowUrl from "leaflet/dist/images/marker-shadow.png";
-
-// Definir un ícono por defecto completo (tamaños/anchors) y aplicarlo a L.Marker
-const DefaultIcon = L.icon({
-  iconUrl: marker1xUrl,
-  iconRetinaUrl: marker2xUrl,
-  shadowUrl: markerShadowUrl,
-  // Estos tamaños/anchors son los del tema por defecto de Leaflet
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  tooltipAnchor: [16, -28],
-  shadowSize: [41, 41],
-});
-
-// Aplicar globalmente para todos los <Marker />
-L.Marker.prototype.options.icon = DefaultIcon;
-
-/* ====== Configuración de negocio ====== */
-const WHATSAPP_NUMBER = "5493760000000"; // reemplazá por tu número (sin + ni espacios)
-
-const VEHICLES = {
-  moto: { label: "Moto", base: 1500, perKm: 300, maxVolumen: "Caja chica" },
-  camioneta: { label: "Camioneta", base: 10000, perKm: 750, maxVolumen: "2-3 bultos" },
-  camion: { label: "Camión", base: 15000, perKm: 1000, maxVolumen: "Carga mediana" },
-} as const;
-type VehicleKey = keyof typeof VEHICLES;
+const MAP_CENTER: LatLng = { lat: -27.3621, lng: -55.9009 }; // Posadas
+const WA_NUMBER = "5493764876249"; // sin "+"
 
 const VEHICLE_AVAILABLE: Record<VehicleKey, boolean> = {
   moto: false,
-  camioneta: true,   // único disponible
+  camioneta: true,
   camion: false,
 };
 
-// Icono personalizado Jinete para ambos pines
-const jineteIcon = new L.Icon({
-  iconUrl: "/images/jinete.png", // viene de /public
-  iconSize: [40, 40],            // ajustá si lo querés más grande/pequeño
-  iconAnchor: [20, 40],          // punta del pin (x,y) sobre el punto del mapa
-  popupAnchor: [0, -36],         // posición del popup relativo al icono
-});
-
-// imágenes (poné archivos en /public/images/)
+// imágenes en /public/images
 const VEHICLE_IMAGES: Record<VehicleKey, string> = {
   moto: "/images/moto.jpg",
   camioneta: "/images/camioneta.png",
   camion: "/images/camion.jpg",
 };
 
-function formatARS(n: number) {
-  return n.toLocaleString("es-AR", {
-    style: "currency",
-    currency: "ARS",
-    maximumFractionDigits: 0,
-  });
-}
-function formatDateTimeLocal(dtStr: string) {
-  if (!dtStr) return "—";
-  const d = new Date(dtStr);
-  return d.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
-}
+const VEHICLE_LABELS: Record<VehicleKey, string> = {
+  moto: "Moto",
+  camioneta: "Camioneta",
+  camion: "Camión",
+};
 
-/* ====== Helpers de geocoding / routing (sin API key) ====== */
-type Pt = { lat: number; lon: number };
-const toLatLng = (p: Pt): LatLngExpression => [p.lat, p.lon];
-
-async function geocode(address: string) {
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
-    address
-  )}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error("Geocoding error");
-  const data = (await res.json()) as Array<{ lat: string; lon: string }>;
-  if (!data.length) throw new Error("No se encontraron resultados");
-  const { lat, lon } = data[0];
-  return { lat: Number(lat), lon: Number(lon) } as Pt;
-}
-
-async function routeOSRM(from: Pt, to: Pt) {
-  const coords = `${from.lon},${from.lat};${to.lon},${to.lat}`;
-  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Routing error");
-  const data = await res.json();
-  if (!data.routes?.length) throw new Error("Sin ruta");
-  const meters: number = data.routes[0].distance;
-  const geo: [number, number][] = data.routes[0].geometry.coordinates; // [lon, lat]
-  const latlngs: LatLngExpression[] = geo.map(([lon, lat]) => [lat, lon]); // Leaflet usa [lat,lon]
-  const km = Math.max(0, Math.round(meters / 100) / 10); // redondeo a 0.1 km
-  return { km, latlngs };
-}
-
-/* ====== Ajuste de vista del mapa ====== */
-function FitBounds({ from, to }: { from?: Pt; to?: Pt }) {
-  const map = useMap();
-  useEffect(() => {
-    if (from && to) {
-      const b = L.latLngBounds([toLatLng(from), toLatLng(to)]);
-      map.fitBounds(b, { padding: [30, 30] });
-    } else if (from) {
-      map.setView(toLatLng(from), 14);
-    }
-  }, [from, to, map]);
-  return null;
-}
-
-/* ====== Utilidad para min del datetime-local (zona local) ====== */
-function nowLocalForInput() {
-  const tzOffset = new Date().getTimezoneOffset() * 60000;
-  return new Date(Date.now() - tzOffset).toISOString().slice(0, 16);
+function VehicleGallery({
+  value,
+  onChange,
+}: {
+  value: VehicleKey;
+  onChange: (v: VehicleKey) => void;
+}) {
+  const items: VehicleKey[] = ["moto", "camioneta", "camion"];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: ".75rem", width: "100%" }}>
+      {items.map((key) => {
+        const selected = value === key;
+        const available = VEHICLE_AVAILABLE[key];
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => available && onChange(key)}
+            title={available ? VEHICLE_LABELS[key] : `${VEHICLE_LABELS[key]} (no disponible)`}
+            style={{
+              cursor: available ? "pointer" : "not-allowed",
+              border: selected ? "2px solid #2563eb" : "1px solid #e5e7eb",
+              borderRadius: 12,
+              overflow: "hidden",
+              background: selected ? "rgba(37,99,235,.08)" : "#fff",
+              boxShadow: selected ? "0 0 0 3px rgba(37,99,235,.15)" : "0 1px 3px rgba(0,0,0,.06)",
+              opacity: available ? 1 : 0.5,
+              padding: 0,
+            }}
+          >
+            <div style={{ aspectRatio: "4 / 3", width: "100%", overflow: "hidden" }}>
+              <img
+                src={VEHICLE_IMAGES[key]}
+                alt={VEHICLE_LABELS[key]}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                loading="lazy"
+              />
+            </div>
+            <div style={{ padding: ".6rem .8rem", textAlign: "center", fontWeight: 600 }}>
+              {VEHICLE_LABELS[key]}
+              {!available && <span style={{ marginLeft: 6, fontWeight: 500, fontSize: 12, color: "#6b7280" }}>(Pronto)</span>}
+              {selected && <span style={{ marginLeft: 8, fontSize: 12, color: "#2563eb" }}>✓</span>}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export default function App() {
-  
-  const mapRef = useRef<L.Map | null>(null);
-// Datos del formulario
-  const [nombre, setNombre] = useState("");
-  const [telefono, setTelefono] = useState("");
-  const [origen, setOrigen] = useState("");
-  const [destino, setDestino] = useState("");
-  const [vehiculo, setVehiculo] = useState<VehicleKey>("camioneta"); // único elegible
-  const [km, setKm] = useState<string>("5");
-  const [ayudante, setAyudante] = useState(false);
-  const [facturaA, setFacturaA] = useState(false);
-  const [notas, setNotas] = useState("");
-  const [pickupAt, setPickupAt] = useState<string>(""); // fecha/hora
+  // Cargar Google Maps JS + Places
+  const { isLoaded } = useJsApiLoader({
+    googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string,
+    libraries: ["places"],
+  });
 
-  // Estado del mapa / cálculo
-  const [from, setFrom] = useState<Pt | undefined>();
-  const [to, setTo] = useState<Pt | undefined>();
-  const [route, setRoute] = useState<LatLngExpression[]>([]);
-  const [calcStatus, setCalcStatus] = useState<"idle" | "loading" | "error">("idle");
-  const [calcMsg, setCalcMsg] = useState("");
+  // Estado UI
+  const [vehiculo, setVehiculo] = useState<VehicleKey>("camioneta");
+  const [fecha, setFecha] = useState<Date | null>(null);
 
-  /* Geocodificar al tipear */
-  const debounceRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    if (origen.trim().length < 3 && destino.trim().length < 3) {
-      setCalcStatus("idle");
+  // Places (texto + coords)
+  const [origenText, setOrigenText] = useState<string>("");
+  const [destinoText, setDestinoText] = useState<string>("");
+
+  const [origenLL, setOrigenLL] = useState<LatLng | null>(null);
+  const [destinoLL, setDestinoLL] = useState<LatLng | null>(null);
+
+  // GMaps helpers
+  const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
+  const [routeInfo, setRouteInfo] = useState<RouteInfo>({});
+  const [usingGeoloc, setUsingGeoloc] = useState<boolean>(false);
+
+  const acOrigenRef = useRef<google.maps.places.Autocomplete | null>(null);
+  const acDestinoRef = useRef<google.maps.places.Autocomplete | null>(null);
+  const onLoadOrigen = useCallback((ac: google.maps.places.Autocomplete) => {
+    ac.setFields(["place_id", "geometry", "formatted_address", "name"]);
+    acOrigenRef.current = ac;
+  }, []);
+
+  const onLoadDestino = useCallback((ac: google.maps.places.Autocomplete) => {
+    ac.setFields(["place_id", "geometry", "formatted_address", "name"]);
+    acDestinoRef.current = ac;
+  }, []);
+
+  const maybeRoute = useCallback(
+    (recent?: LatLng, which?: "origen" | "destino") => {
+      const o = which === "origen" ? recent ?? origenLL : origenLL;
+      const d = which === "destino" ? recent ?? destinoLL : destinoLL;
+      if (!o || !d) return;
+
+      const service = new google.maps.DirectionsService();
+      service.route(
+        { origin: o, destination: d, travelMode: google.maps.TravelMode.DRIVING },
+        (res, status) => {
+          if (status === "OK" && res) {
+            setDirections(res);
+            const leg = res.routes?.[0]?.legs?.[0];
+            setRouteInfo({
+              distanceText: leg?.distance?.text,
+              durationText: leg?.duration?.text,
+            });
+          } else {
+            console.warn("Directions failed:", status);
+            setDirections(null);
+            setRouteInfo({});
+          }
+        }
+      );
+    },
+    [origenLL, destinoLL]
+  );
+
+  const pickFromAutocomplete = useCallback(
+    (which: "origen" | "destino") => {
+      const ac = which === "origen" ? acOrigenRef.current : acDestinoRef.current;
+      if (!ac) return;
+      const place = ac.getPlace();
+      const ll = place?.geometry?.location;
+      if (!ll) return;
+
+      const coords = { lat: ll.lat(), lng: ll.lng() };
+      const label = place.formatted_address || place.name || (which === "origen" ? "Origen" : "Destino");
+
+      if (which === "origen") {
+        setOrigenText(label);
+        setOrigenLL(coords);
+        setUsingGeoloc(false);
+      } else {
+        setDestinoText(label);
+        setDestinoLL(coords);
+      }
+      setTimeout(() => maybeRoute(coords, which), 0);
+    },
+    [maybeRoute]
+  );
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) {
+      alert("Tu navegador no soporta geolocalización.");
       return;
     }
-    debounceRef.current = window.setTimeout(async () => {
-      try {
-        setCalcStatus("loading");
-        setCalcMsg("Buscando direcciones…");
-        const nf = origen.trim().length >= 3 ? await geocode(origen) : undefined;
-        const nt = destino.trim().length >= 3 ? await geocode(destino) : undefined;
-        setFrom(nf);
-        setTo(nt);
-        setCalcStatus("idle");
-        setCalcMsg("");
-      } catch {
-        setCalcStatus("error");
-        setCalcMsg("No se pudo geocodificar alguna dirección.");
-      }
-    }, 600);
-    return () => {
-      if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    };
-  }, [origen, destino]);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const ll = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setOrigenLL(ll);
+        setOrigenText("Mi ubicación");
+        setUsingGeoloc(true);
+        maybeRoute(ll, "origen");
+      },
+      () => alert("No pudimos acceder a tu ubicación.")
+    );
+  };
 
-  /* Calcular ruta (y km) cuando hay ambos puntos */
-  useEffect(() => {
-    (async () => {
-      if (from && to) {
-        try {
-          setCalcStatus("loading");
-          setCalcMsg("Calculando ruta…");
-          const r = await routeOSRM(from, to);
-          setRoute(r.latlngs);
-          setKm(String(r.km));
-          setCalcStatus("idle");
-          setCalcMsg("");
-        } catch {
-          setCalcStatus("error");
-          setCalcMsg("No se pudo calcular la ruta.");
-          setRoute([]);
-        }
-      } else {
-        setRoute([]);
-      }
-    })();
-  }, [from, to]);
+  const limpiar = () => {
+    setOrigenText("");
+    setDestinoText("");
+    setFecha(null);               // ← Date|null
+    setVehiculo("camioneta");     // ← clave válida
+    setOrigenLL(null);
+    setDestinoLL(null);
+    setUsingGeoloc(false);
+    setDirections(null);
+    setRouteInfo({});
+  };
 
-  /* Clic en el mapa: primero origen, luego destino; arrastrables */
-  const nextIsFrom = useMemo(() => !from || (from && to), [from, to]);
-  const handleMapClick = useCallback((e: LeafletMouseEvent) => {
-    const p = { lat: e.latlng.lat, lon: e.latlng.lng };
-    if (nextIsFrom) setFrom(p);
-    else setTo(p);
-  }, [nextIsFrom, setFrom, setTo]);
-  
-  function useMyLocation() {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition((pos) => {
-      setFrom({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-    });
-  }
+  const buildSearchLink = (ll: LatLng | null) =>
+    ll ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${ll.lat},${ll.lng}`)}` : "";
 
-  /* Descuento por anticipo (>= 24h) */
-  const anticipado = useMemo(() => {
-    if (!pickupAt) return false;
-    const when = new Date(pickupAt).getTime();
-    return when - Date.now() >= 24 * 60 * 60 * 1000;
-  }, [pickupAt]);
+  const buildDirectionsLink = (o: LatLng | null, d: LatLng | null) =>
+    o && d
+      ? `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(`${o.lat},${o.lng}`)}&destination=${encodeURIComponent(`${d.lat},${d.lng}`)}&travelmode=driving`
+      : "";
 
-  /* Precio */
-  const precio = useMemo(() => {
-    const kmNum = Math.max(0, Number(km) || 0);
-    const v = VEHICLES[vehiculo];
-    const cargoKm = v.perKm * kmNum;
-    const extraAyudante = ayudante ? 7500 : 0;
+  const reservarWhatsApp = () => {
+    if (!origenLL || !destinoLL) {
+      alert("Completá ORIGEN y DESTINO antes de enviar.");
+      return;
+    }
+    const origenLink = buildSearchLink(origenLL);
+    const destinoLink = buildSearchLink(destinoLL);
+    const rutaLink = buildDirectionsLink(origenLL, destinoLL);
 
-    const subtotal = v.base + cargoKm + extraAyudante;
-    const descuentoAnticipo = anticipado ? subtotal * 0.1 : 0;
+    const fechaTxt =
+      fecha
+        ? fecha.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })
+        : null;
 
-    const baseParaFactura = subtotal - descuentoAnticipo;
-    const recargoFacturaA = facturaA ? baseParaFactura * 0.1 : 0;
-
-    const total = Math.round(baseParaFactura + recargoFacturaA);
-
-    return {
-      baseVehiculo: v.base,
-      perKm: v.perKm,
-      km: kmNum,
-      cargoKm,
-      extraAyudante,
-      descuentoAnticipo,
-      recargoFacturaA,
-      total,
-    };
-  }, [vehiculo, km, ayudante, facturaA, anticipado]);
-
-  /* WhatsApp */
-  function buildWhatsAppURL() {
-    const v = VEHICLES[vehiculo];
-    const lineas = [
-      `🚚 *Pedido de flete* - tuflete`,
-      `👤 Nombre: ${nombre || "—"}`,
-      telefono ? `📞 Tel: ${telefono}` : null,
-      `📦 Vehículo: ${v.label}`,
-      `📍 Origen: ${origen || "—"}`,
-      `🎯 Destino: ${destino || "—"}`,
-      `⏰ Reserva: ${formatDateTimeLocal(pickupAt)}`,
-      `📏 Distancia: ${precio.km} km`,
-      ayudante ? `🧑‍🔧 Con ayudante: Sí` : `🧑‍🔧 Con ayudante: No`,
-      facturaA ? `🧾 Factura: A` : `🧾 Factura: B / C`,
-      anticipado ? `🏷️ Descuento por anticipo aplicado (10%)` : null,
-      notas ? `📝 Notas: ${notas}` : null,
+    const texto = [
+      "Hola, quiero reservar un flete 🚚",
+      `* Origen: ${origenText || "—"}`,
+      `  📍 ${origenLink}`,
+      `* Destino: ${destinoText || "—"}`,
+      `  📍 ${destinoLink}`,
+      fechaTxt ? `* Fecha/Hora: ${fechaTxt}` : null,
+      `* Vehículo: ${VEHICLE_LABELS[vehiculo]}`,
+      routeInfo.distanceText ? `* Distancia aprox.: ${routeInfo.distanceText}` : null,
+      routeInfo.durationText ? `* Duración aprox.: ${routeInfo.durationText}` : null,
+      rutaLink ? `* Ruta completa: ${rutaLink}` : null,
       "",
-      `💰 Estimado: ${formatARS(precio.total)} (Base ${formatARS(
-        precio.baseVehiculo
-      )} + ${formatARS(precio.perKm)} x km + extras${anticipado ? " - 10% anticipo" : ""}${
-        facturaA ? " + recargo Factura A" : ""
-      })`,
+      "¿Me confirman disponibilidad y tarifa?",
     ]
       .filter(Boolean)
       .join("\n");
-    return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(lineas)}`;
-  }
 
-  const canQuote = origen.trim() && destino.trim() && Number(km) > 0;
+    const base = WA_NUMBER ? `https://wa.me/${WA_NUMBER}?text=` : `https://wa.me/?text=`;
+    window.open(base + encodeURIComponent(texto), "_blank");
+  };
+
+  if (!isLoaded) return <p>Cargando mapa...</p>;
 
   return (
-    <main className="min-h-screen bg-gray-50 text-gray-900">
-      {/* NAV */}
-      <nav className="sticky top-0 z-10 w-full border-b bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl border bg-gray-50 font-bold">
-              TF
-            </span>
-            <span className="text-lg font-semibold tracking-tight">tuflete</span>
-          </div>
-          <a
-            href="#cotizar"
-            className="rounded-xl border px-3 py-1.5 text-sm font-medium hover:border-indigo-400 hover:bg-indigo-50"
-          >
-            Pedir ahora
-          </a>
-        </div>
-      </nav>
-
-      {/* HERO */}
-      <header className="mx-auto max-w-6xl px-4 py-10 md:py-14">
-        <h1 className="text-4xl font-bold tracking-tight md:text-5xl">
-          Fletes de última milla en <span className="text-indigo-600">minutos</span>
-        </h1>
-        <p className="mt-3 text-gray-600">
-          Retiro y entrega puerta a puerta. Tarifas claras. Pedilo por WhatsApp.
-        </p>
+    <main style={{ maxWidth: 920, margin: "0 auto", padding: "1rem" }}>
+      <header>
+        <h1 style={{ marginBottom: 4 }}>TuFlete</h1>
+        <p style={{ marginTop: 0, opacity: 0.8 }}>Pedí tu flete en minutos</p>
       </header>
 
-      {/* FORM + MAPA */}
-      <section id="cotizar" className="mx-auto max-w-6xl px-4 pb-12">
-        <div className="grid gap-6 md:grid-cols-3">
-          <div className="md:col-span-2 rounded-2xl border bg-white p-6 shadow-sm">
-            <h2 className="text-xl font-semibold">Cotizá tu envío</h2>
 
-            <div className="mt-5 grid gap-4 md:grid-cols-2">
-              {/* Nombre y Teléfono */}
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-sm font-medium">Nombre</label>
-                <input
-                  value={nombre}
-                  onChange={(e) => setNombre(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                  placeholder="Tu nombre"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium">Teléfono (opcional)</label>
-                <input
-                  value={telefono}
-                  onChange={(e) => setTelefono(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                  placeholder="+54 9 ..."
-                />
-              </div>
-
-              {/* Fecha y hora */}
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-sm font-medium">Fecha y hora de reserva</label>
-                <input
-                  type="datetime-local"
-                  min={nowLocalForInput()}
-                  value={pickupAt}
-                  onChange={(e) => setPickupAt(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                />
-                <div className="mt-1 flex items-center gap-3 text-xs">
-                  <span className="text-gray-500">
-                    {pickupAt ? `Seleccionado: ${formatDateTimeLocal(pickupAt)}` : "Seleccioná día y hora"}
-                  </span>
-                  {anticipado && (
-                    <span className="rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700">
-                      10% OFF por reserva anticipada
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Vehículo (solo lectura; se elige en la barra lateral) */}
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-sm font-medium">Vehículo</label>
-                <div className="flex items-center justify-between rounded-xl border bg-gray-50 px-3 py-2">
-                  <span className="text-sm">
-                    {VEHICLES[vehiculo].label} — base {formatARS(VEHICLES[vehiculo].base)} / {formatARS(VEHICLES[vehiculo].perKm)} x km
-                  </span>
-                  <span className="text-xs text-gray-500">Elegilo en la barra lateral</span>
-                </div>
-              </div>
-
-              {/* Origen / Destino */}
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-sm font-medium">Origen</label>
-                <input
-                  value={origen}
-                  onChange={(e) => setOrigen(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                  placeholder="Dirección de retiro (calle, nro, ciudad)"
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-sm font-medium">Destino</label>
-                <input
-                  value={destino}
-                  onChange={(e) => setDestino(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                  placeholder="Dirección de entrega (calle, nro, ciudad)"
-                />
-              </div>
-
-              {/* Distancia (auto, editable si hace falta) */}
-              <div>
-                <label className="mb-1 block text-sm font-medium">Distancia estimada (km)</label>
-                <div className="relative">
-                  <input
-                    value={km}
-                    onChange={(e) => setKm(e.target.value)}
-                    className="w-full rounded-xl border px-3 py-2 pr-28 outline-none focus:border-indigo-400"
-                    placeholder="Ej: 7"
-                    inputMode="decimal"
-                  />
-                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">
-                    {calcStatus === "loading" ? "calculando…" : "auto"}
-                  </span>
-                </div>
-                {calcStatus === "error" && <p className="mt-1 text-xs text-amber-600">{calcMsg}</p>}
-                {calcStatus === "loading" && <p className="mt-1 text-xs text-gray-500">{calcMsg}</p>}
-              </div>
-
-              {/* Mapa */}
-              <div className="md:col-span-2 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Hacé clic en el mapa para fijar origen y destino. Podés arrastrar los marcadores.</span>
-                  <button
-                    type="button"
-                    onClick={useMyLocation}
-                    className="rounded-xl border px-3 py-1.5 text-sm hover:border-indigo-400 hover:bg-indigo-50"
-                  >
-                    Usar mi ubicación
-                  </button>
-                </div>
-
-<MapContainer
-  center={[-27.3671, -55.8961]}
-  zoom={13}
-  style={{ height: 360, width: "100%", borderRadius: 16 }}
-  ref={mapRef}
-  whenReady={() => {
-    const map = mapRef.current as L.Map | null;
-    if (!map) return;
-
-    // Limpio posibles listeners previos (útil en HMR)
-    map.off("click", handleMapClick);
-    map.on("click", handleMapClick);
-  }}
->
-  <TileLayer
-    attribution="&copy; OpenStreetMap contributors"
-    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-  />
-
-{from && (
-  <Marker
-    position={toLatLng(from)}
-    icon={jineteIcon}              // ← AQUI
-    draggable
-    eventHandlers={{
-      dragend: (e) => {
-        const m = e.target as L.Marker;
-        const ll = m.getLatLng();
-        setFrom({ lat: ll.lat, lon: ll.lng });
-      },
+{/* Origen */}
+<div style={{ position: "relative", width: "100%", marginTop: "1rem" }}>
+  <span
+    style={{
+      position: "absolute",
+      left: ".8rem",
+      top: "50%",
+      transform: "translateY(-50%)",
+      fontSize: "1.2rem",
     }}
   >
-    <Popup>Origen</Popup>
-  </Marker>
-)}
+    📍
+  </span>
+  <Autocomplete onLoad={onLoadOrigen} onPlaceChanged={() => pickFromAutocomplete("origen")}>
+    <input
+      value={origenText}
+      onChange={(e) => {
+        setOrigenText(e.target.value);
+        if (usingGeoloc) setUsingGeoloc(false);
+      }}
+      placeholder="Origen (calle, ciudad…)"
+      autoComplete="off"
+      style={{
+        width: "100%",
+        fontSize: "1.05rem",
+        padding: ".85rem 2.5rem .85rem 2.5rem", // deja espacio a izquierda y derecha
+        borderRadius: "8px",
+      }}
+    />
+  </Autocomplete>
+  {!usingGeoloc && (
+    <button
+      onClick={useMyLocation}
+      title="Usar mi ubicación"
+      style={{
+        position: "absolute",
+        right: ".5rem",
+        top: "50%",
+        transform: "translateY(-50%)",
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        fontSize: "1.2rem",
+      }}
+    >
+      📌
+    </button>
+  )}
+</div>
 
-{to && (
-  <Marker
-    position={toLatLng(to)}
-    icon={jineteIcon}              // ← Y AQUI
-    draggable
-    eventHandlers={{
-      dragend: (e) => {
-        const m = e.target as L.Marker;
-        const ll = m.getLatLng();
-        setTo({ lat: ll.lat, lon: ll.lng });
-      },
+{/* Destino */}
+<div style={{ position: "relative", width: "100%", marginTop: ".75rem" }}>
+  <span
+    style={{
+      position: "absolute",
+      left: ".8rem",
+      top: "50%",
+      transform: "translateY(-50%)",
+      fontSize: "1.2rem",
     }}
   >
-    <Popup>Destino</Popup>
-  </Marker>
-)}
+    🎯
+  </span>
+  <Autocomplete onLoad={onLoadDestino} onPlaceChanged={() => pickFromAutocomplete("destino")}>
+    <input
+      value={destinoText}
+      onChange={(e) => setDestinoText(e.target.value)}
+      placeholder="Destino (calle, ciudad…)"
+      autoComplete="off"
+      style={{
+        width: "100%",
+        fontSize: "1.05rem",
+        padding: ".85rem 2.5rem .85rem 2.5rem",
+        borderRadius: "8px",
+      }}
+    />
+  </Autocomplete>
+  <button
+    onClick={limpiar}
+    title="Limpiar"
+    style={{
+      position: "absolute",
+      right: ".5rem",
+      top: "50%",
+      transform: "translateY(-50%)",
+      border: "none",
+      background: "transparent",
+      cursor: "pointer",
+      fontSize: "1.2rem",
+    }}
+  >
+    🧹
+  </button>
+</div>
 
-                  {!!route.length && <Polyline positions={route} />}
-                  <FitBounds from={from} to={to} />
-                </MapContainer>
-              </div>
+      {/* Mapa */}
+      <div style={{ marginTop: ".9rem" }}>
+        <GoogleMap
+          mapContainerStyle={{ height: "360px", width: "100%", borderRadius: "12px" }}
+          center={destinoLL || MAP_CENTER}
+          zoom={13}
+          options={{
+            mapTypeControl: false,
+            streetViewControl: false,
+            fullscreenControl: false,
+          }}
+        >
 
-              {/* Ayudante / Factura */}
-              <div className="flex items-center gap-6">
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={ayudante} onChange={(e) => setAyudante(e.target.checked)} className="h-4 w-4" />
-                  Necesito ayudante (+{formatARS(7500)})
-                </label>
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={facturaA} onChange={(e) => setFacturaA(e.target.checked)} className="h-4 w-4" />
-                  Factura A (+10%)
-                </label>
-              </div>
+          {origenLL && <Marker position={origenLL} label="A" title="Origen" />}
+          {destinoLL && <Marker position={destinoLL} label="B" title="Destino" />}
+          {directions && <DirectionsRenderer directions={directions} options={{ suppressMarkers: true }} />}
+        </GoogleMap>
+      </div>
 
-              {/* Notas */}
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-sm font-medium">Notas (opcional)</label>
-                <input
-                  value={notas}
-                  onChange={(e) => setNotas(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                  placeholder="Pisos, horarios, referencias…"
-                />
-              </div>
-            </div>
-
-            {/* RESUMEN */}
-            <div className="mt-6 rounded-2xl border bg-gray-50 p-4 text-sm">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="font-medium">Resumen:</span>
-                <span>Base vehículo: {formatARS(precio.baseVehiculo)}</span>
-                <span>•</span>
-                <span>{precio.km} km x {formatARS(precio.perKm)} = {formatARS(precio.cargoKm)}</span>
-                {ayudante && (<><span>•</span><span>Ayudante: {formatARS(precio.extraAyudante)}</span></>)}
-                {anticipado && (<><span>•</span><span className="text-green-700">Descuento anticipo: -{formatARS(precio.descuentoAnticipo)}</span></>)}
-                {facturaA && (<><span>•</span><span>Recargo Factura A: {formatARS(precio.recargoFacturaA)}</span></>)}
-                <span className="ml-auto text-base font-semibold">Total: {formatARS(precio.total)}</span>
-              </div>
-            </div>
-
-            {/* Acciones */}
-            <div className="mt-4 flex flex-wrap gap-3">
-              <a
-                href={buildWhatsAppURL()}
-                target="_blank"
-                className={`inline-flex items-center justify-center rounded-xl px-5 py-2.5 text-white shadow ${
-                  canQuote ? "bg-indigo-600 hover:opacity-95" : "bg-gray-300 cursor-not-allowed"
-                }`}
-                onClick={(e) => { if (!canQuote) e.preventDefault(); }}
-              >
-                Enviar pedido por WhatsApp
-              </a>
-              <button
-                className="rounded-xl border px-5 py-2.5 hover:border-indigo-400 hover:bg-indigo-50"
-                onClick={() => {
-                  setNombre(""); setTelefono(""); setOrigen(""); setDestino("");
-                  setVehiculo("camioneta"); setKm("5"); setAyudante(false); setFacturaA(false); setNotas("");
-                  setPickupAt(""); setFrom(undefined); setTo(undefined); setRoute([]);
-                  setCalcStatus("idle"); setCalcMsg("");
-                }}
-              >
-                Limpiar
-              </button>
-            </div>
-
-            {!canQuote && (
-              <p className="mt-2 text-xs text-amber-600">
-                Completá origen, destino y km para habilitar WhatsApp.
-              </p>
-            )}
-          </div>
-
-          {/* ASIDE: tarjetas de vehículos (solo Camioneta disponible) */}
-          <aside className="space-y-4">
-            <div className="rounded-2xl border bg-white p-5 shadow-sm">
-              <h3 className="mb-2 font-semibold">Elegí tu vehículo</h3>
-
-              <ul className="grid gap-3">
-                {Object.entries(VEHICLES).map(([k, v]) => {
-                  const key = k as VehicleKey;
-                  const selected = vehiculo === key;
-                  const available = VEHICLE_AVAILABLE[key];
-
-                  return (
-                    <li
-                      key={k}
-                      className={`overflow-hidden rounded-2xl border bg-gray-50 transition ${
-                        selected ? "ring-2 ring-indigo-500 border-indigo-400" : "hover:border-indigo-300"
-                      } ${!available ? "opacity-60" : ""}`}
-                    >
-                      <button
-                        type="button"
-                        disabled={!available}
-                        aria-disabled={!available}
-                        onClick={() => {
-                          if (!available) return;
-                          setVehiculo(key);
-                        }}
-                        className={`flex w-full items-center gap-3 p-3 text-left ${
-                          !available ? "cursor-not-allowed" : ""
-                        }`}
-                        title={available ? `Seleccionar ${v.label}` : `${v.label} no disponible`}
-                      >
-                        <div className="relative h-16 w-24 overflow-hidden rounded-lg bg-white">
-                          <img
-                            src={VEHICLE_IMAGES[key]}
-                            alt={v.label}
-                            className="h-full w-full object-cover"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).src =
-                                "https://picsum.photos/seed/" + key + "/300/200";
-                            }}
-                          />
-                          {!available && (
-                            <span className="absolute right-1 top-1 rounded-full bg-gray-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
-                              No disponible
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex-1">
-                          <div className="flex items-center justify-between">
-                            <span className="font-medium">{v.label}</span>
-                            <span className="text-xs text-gray-500">{v.maxVolumen}</span>
-                          </div>
-                          <div className="text-sm text-gray-600">
-                            Base {formatARS(v.base)} • {formatARS(v.perKm)}/km
-                          </div>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-
-              <p className="mt-3 text-xs text-gray-500">
-                Las fotos son ilustrativas.
-              </p>
-            </div>
-          </aside>
+      {/* Vehículo + Fecha + WhatsApp */}
+      <div style={{ marginTop: ".9rem", display: "flex", gap: ".5rem", alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ width: "50%", minWidth: 280 }}>
+          <VehicleGallery value={vehiculo} onChange={setVehiculo} />
         </div>
-      </section>
 
-      {/* FOOTER */}
-      <footer className="border-t bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-gray-600">
-          <span>© {new Date().getFullYear()} tuflete</span>
-          <a
-            className="hover:text-gray-900"
-            href="https://github.com/gazzimon/tuflete"
-            target="_blank"
-            rel="noreferrer"
-          >
-            GitHub del proyecto
-          </a>
-        </div>
-      </footer>
+        <DatePicker
+          selected={fecha}
+          onChange={(date) => setFecha(date)}
+          showTimeSelect
+          timeFormat="HH:mm"
+          timeIntervals={15}
+          dateFormat="dd/MM/yyyy HH:mm"
+          placeholderText="Selecciona fecha y hora"
+          className="button"
+        />
+
+        <button onClick={reservarWhatsApp} className="button primary">✉️ Reservar por WhatsApp</button>
+      </div>
+
+      {(routeInfo.distanceText || routeInfo.durationText) && (
+        <p style={{ marginTop: ".5rem", opacity: 0.85 }}>
+          {routeInfo.distanceText ? `Distancia aprox.: ${routeInfo.distanceText} · ` : ""}
+          {routeInfo.durationText ? `Duración aprox.: ${routeInfo.durationText}` : ""}
+        </p>
+      )}
     </main>
   );
 }

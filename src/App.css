@@ -1,3 +1,28 @@
+/* Normaliza los campos de input en todos los navegadores */
+input, select, textarea {
+  background-color: #ffffff !important; /* Fondo blanco */
+  color: #000000 !important;            /* Texto negro */
+  border: 1px solid #ccc;               /* Borde gris */
+  border-radius: 6px;                   /* Bordes redondeados */
+  padding: 10px;
+  font-size: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Placeholder consistente */
+input::placeholder, textarea::placeholder {
+  color: #888; /* Gris claro */
+}
+
+/* Evita que el navegador aplique estilos oscuros automáticamente */
+@media (prefers-color-scheme: dark) {
+  input, select, textarea {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+  }
+}
+
 #root {
   max-width: 1280px;
   margin: 0 auto;
