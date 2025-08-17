@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import "./index.css";
+import type * as L from "leaflet";
 
 /* ====== Leaflet (React-Leaflet + Vite) ====== */
 import "leaflet/dist/leaflet.css";
@@ -14,8 +15,7 @@ import {
 } from "react-leaflet";
 
 // Importar Leaflet como espacio de nombres (valor) + tipos aparte
-import * as L from "leaflet";
-import type { LeafletMouseEvent, LatLngExpression } from "leaflet";
+import type { LatLngExpression, LeafletMouseEvent } from "leaflet";
 
 // Importar assets como módulos para que Vite los resuelva en build
 import marker2xUrl from "leaflet/dist/images/marker-icon-2x.png";
@@ -133,9 +133,15 @@ function nowLocalForInput() {
 }
 
 export default function App() {
-  
-  const mapRef = useRef<L.Map | null>(null);
-// Datos del formulario
+  // Datos del formulario
+const mapRef = useRef<L.Map | null>(null);
+
+const onMapClick = useCallback((ev: L.LeafletMouseEvent) => {
+  const p = { lat: ev.latlng.lat, lon: ev.latlng.lng };
+  if (!from || (from && to)) setFrom(p);
+  else setTo(p);
+}, [from, to, setFrom, setTo]);
+
   const [nombre, setNombre] = useState("");
   const [telefono, setTelefono] = useState("");
   const [origen, setOrigen] = useState("");
@@ -177,6 +183,7 @@ export default function App() {
         setCalcMsg("No se pudo geocodificar alguna dirección.");
       }
     }, 600);
+
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
@@ -207,12 +214,11 @@ export default function App() {
 
   /* Clic en el mapa: primero origen, luego destino; arrastrables */
   const nextIsFrom = useMemo(() => !from || (from && to), [from, to]);
-  const handleMapClick = useCallback((e: LeafletMouseEvent) => {
+  function handleMapClick(e: L.LeafletMouseEvent) {
     const p = { lat: e.latlng.lat, lon: e.latlng.lng };
     if (nextIsFrom) setFrom(p);
     else setTo(p);
-  }, [nextIsFrom, setFrom, setTo]);
-  
+  }
   function useMyLocation() {
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition((pos) => {
@@ -412,78 +418,74 @@ export default function App() {
                 {calcStatus === "error" && <p className="mt-1 text-xs text-amber-600">{calcMsg}</p>}
                 {calcStatus === "loading" && <p className="mt-1 text-xs text-gray-500">{calcMsg}</p>}
               </div>
+{/* Mapa */}
+<div className="md:col-span-2 space-y-2">
+  <div className="flex items-center justify-between">
+    <span className="text-sm text-gray-600">
+      Hacé clic en el mapa para fijar origen y destino. Podés arrastrar los marcadores.
+    </span>
+    <button
+      type="button"
+      onClick={useMyLocation}
+      className="rounded-xl border px-3 py-1.5 text-sm hover:border-indigo-400 hover:bg-indigo-50"
+    >
+      Usar mi ubicación
+    </button>
+  </div>
 
-              {/* Mapa */}
-              <div className="md:col-span-2 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Hacé clic en el mapa para fijar origen y destino. Podés arrastrar los marcadores.</span>
-                  <button
-                    type="button"
-                    onClick={useMyLocation}
-                    className="rounded-xl border px-3 py-1.5 text-sm hover:border-indigo-400 hover:bg-indigo-50"
-                  >
-                    Usar mi ubicación
-                  </button>
-                </div>
-
-<MapContainer
-  center={[-27.3671, -55.8961]}
-  zoom={13}
-  style={{ height: 360, width: "100%", borderRadius: 16 }}
-  ref={mapRef}
-  whenReady={() => {
-    const map = mapRef.current as L.Map | null;
-    if (!map) return;
-
-    // Limpio posibles listeners previos (útil en HMR)
-    map.off("click", handleMapClick);
-    map.on("click", handleMapClick);
-  }}
->
-  <TileLayer
-    attribution="&copy; OpenStreetMap contributors"
-    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-  />
-
-{from && (
-  <Marker
-    position={toLatLng(from)}
-    icon={jineteIcon}              // ← AQUI
-    draggable
-    eventHandlers={{
-      dragend: (e) => {
-        const m = e.target as L.Marker;
-        const ll = m.getLatLng();
-        setFrom({ lat: ll.lat, lon: ll.lng });
-      },
+  <MapContainer
+    center={[-27.3671, -55.8961]}
+    zoom={13}
+    style={{ height: 360, width: "100%", borderRadius: 16 }}
+    ref={mapRef} // ✅ ref al mapa
+    whenReady={() => {
+      const map = mapRef.current; // ✅ sin 'e'
+      if (!map) return;
+      // Evitar listeners duplicados en dev/HMR: primero quitamos, luego agregamos
+      map.off("click", onMapClick);
+      map.on("click", onMapClick);
     }}
   >
-    <Popup>Origen</Popup>
-  </Marker>
-)}
+    <TileLayer
+      attribution="&copy; OpenStreetMap contributors"
+      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+    />
 
-{to && (
-  <Marker
-    position={toLatLng(to)}
-    icon={jineteIcon}              // ← Y AQUI
-    draggable
-    eventHandlers={{
-      dragend: (e) => {
-        const m = e.target as L.Marker;
-        const ll = m.getLatLng();
-        setTo({ lat: ll.lat, lon: ll.lng });
-      },
-    }}
-  >
-    <Popup>Destino</Popup>
-  </Marker>
-)}
+    {from && (
+      <Marker
+        position={toLatLng(from)}
+        icon={jineteIcon}
+        draggable
+        eventHandlers={{
+          dragend: (e) => {
+            const m = e.target as L.Marker;
+            const ll = m.getLatLng();
+            setFrom({ lat: ll.lat, lon: ll.lng });
+          },
+        }}
+      >
+        <Popup>Origen</Popup>
+      </Marker>
+    )}
 
-                  {!!route.length && <Polyline positions={route} />}
-                  <FitBounds from={from} to={to} />
-                </MapContainer>
-              </div>
-
+    {to && (
+      <Marker
+        position={toLatLng(to)}
+        icon={jineteIcon}
+        draggable
+        eventHandlers={{
+          dragend: (e) => {
+            const m = e.target as L.Marker;
+            const ll = m.getLatLng();
+            setTo({ lat: ll.lat, lon: ll.lng });
+          },
+        }}
+      >
+        <Popup>Destino</Popup>
+      </Marker>
+    )}
+  </MapContainer>
+</div>
               {/* Ayudante / Factura */}
               <div className="flex items-center gap-6">
                 <label className="inline-flex items-center gap-2 text-sm">

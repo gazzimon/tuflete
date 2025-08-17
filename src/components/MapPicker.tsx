@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MapContainer, TileLayer, Marker, Polyline, useMap, Popup
 } from "react-leaflet";
-import L, { LatLngExpression } from "leaflet";
+import L from "leaflet";
+import type { LatLngExpression } from "leaflet";
 
 // ----- Fix de iconos en Vite -----
 import marker2x from "leaflet/dist/images/marker-icon-2x.png";
@@ -156,14 +157,19 @@ export default function MapPicker(props: MapPickerProps) {
         </button>
       </div>
 
-      <MapContainer
-        center={[-27.3671, -55.8961]} // Posadas aprox. (cambiá si querés)
-        zoom={13}
-        style={{ height: 360, width: "100%", borderRadius: 16 }}
-        whenCreated={(map) => {
-          map.on("click", handleMapClick as any);
-        }}
-      >
+<MapContainer
+  center={[-27.3671, -55.8961]}
+  zoom={13}
+  style={{ height: 360, width: "100%", borderRadius: 16 }}
+  whenReady={() => {
+    const map = e.target; // tipo: L.Map
+    map.on("click", (ev: L.LeafletMouseEvent) => {
+      const p = { lat: ev.latlng.lat, lon: ev.latlng.lng };
+      if (!from || (from && to)) setFrom(p);
+      else setTo(p);
+    });
+  }}
+>
         <TileLayer
           attribution='&copy; OpenStreetMap'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
