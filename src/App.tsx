@@ -23,14 +23,27 @@ L.Icon.Default.mergeOptions({
 });
 
 /* ====== Configuración de negocio ====== */
-const WHATSAPP_NUMBER = "5493764876249"; // ← reemplazá por tu número (sin + ni espacios)
+const WHATSAPP_NUMBER = "5493760000000"; // reemplazá por tu número (sin + ni espacios)
 
 const VEHICLES = {
-  moto: { label: "Moto", base: 2500, perKm: 300, maxVolumen: "Caja chica" },
-  auto: { label: "Auto", base: 3500, perKm: 400, maxVolumen: "Baúl / 2-3 bultos" },
-  camioneta: { label: "Camioneta", base: 6000, perKm: 600, maxVolumen: "Carga mediana" },
+  moto: { label: "Moto", base: 1500, perKm: 300, maxVolumen: "Caja chica" },
+  camioneta: { label: "Camioneta", base: 10000, perKm: 750, maxVolumen: "2-3 bultos" },
+  camion: { label: "Camión", base: 15000, perKm: 1000, maxVolumen: "Carga mediana" },
 } as const;
 type VehicleKey = keyof typeof VEHICLES;
+
+const VEHICLE_AVAILABLE: Record<VehicleKey, boolean> = {
+  moto: false,
+  camioneta: true,   // único disponible
+  camion: false,
+};
+
+// imágenes (poné archivos en /public/images/)
+const VEHICLE_IMAGES: Record<VehicleKey, string> = {
+  moto: "/images/moto.jpg",
+  camioneta: "/images/camioneta.jpg",
+  camion: "/images/camion.jpg",
+};
 
 function formatARS(n: number) {
   return n.toLocaleString("es-AR", {
@@ -39,8 +52,13 @@ function formatARS(n: number) {
     maximumFractionDigits: 0,
   });
 }
+function formatDateTimeLocal(dtStr: string) {
+  if (!dtStr) return "—";
+  const d = new Date(dtStr);
+  return d.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
+}
 
-/* ====== Helpers de geocoding / routing (Nominatim + OSRM, sin API key) ====== */
+/* ====== Helpers de geocoding / routing (sin API key) ====== */
 type Pt = { lat: number; lon: number };
 const toLatLng = (p: Pt): LatLngExpression => [p.lat, p.lon];
 
@@ -48,9 +66,7 @@ async function geocode(address: string) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
     address
   )}`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error("Geocoding error");
   const data = (await res.json()) as Array<{ lat: string; lon: string }>;
   if (!data.length) throw new Error("No se encontraron resultados");
@@ -68,11 +84,11 @@ async function routeOSRM(from: Pt, to: Pt) {
   const meters: number = data.routes[0].distance;
   const geo: [number, number][] = data.routes[0].geometry.coordinates; // [lon, lat]
   const latlngs: LatLngExpression[] = geo.map(([lon, lat]) => [lat, lon]); // Leaflet usa [lat,lon]
-  const km = Math.max(0, Math.round(meters / 100) / 10); // redondeo a 0.1km
+  const km = Math.max(0, Math.round(meters / 100) / 10); // redondeo a 0.1 km
   return { km, latlngs };
 }
 
-/* ====== Componente para ajustar vista del mapa ====== */
+/* ====== Ajuste de vista del mapa ====== */
 function FitBounds({ from, to }: { from?: Pt; to?: Pt }) {
   const map = useMap();
   useEffect(() => {
@@ -86,28 +102,33 @@ function FitBounds({ from, to }: { from?: Pt; to?: Pt }) {
   return null;
 }
 
+/* ====== Utilidad para min del datetime-local (zona local) ====== */
+function nowLocalForInput() {
+  const tzOffset = new Date().getTimezoneOffset() * 60000;
+  return new Date(Date.now() - tzOffset).toISOString().slice(0, 16);
+}
+
 export default function App() {
   // Datos del formulario
   const [nombre, setNombre] = useState("");
   const [telefono, setTelefono] = useState("");
   const [origen, setOrigen] = useState("");
   const [destino, setDestino] = useState("");
-  const [vehiculo, setVehiculo] = useState<VehicleKey>("camioneta");
+  const [vehiculo, setVehiculo] = useState<VehicleKey>("camioneta"); // único elegible
   const [km, setKm] = useState<string>("5");
   const [ayudante, setAyudante] = useState(false);
   const [facturaA, setFacturaA] = useState(false);
   const [notas, setNotas] = useState("");
+  const [pickupAt, setPickupAt] = useState<string>(""); // fecha/hora
 
-  // Estado del cálculo y mapa
+  // Estado del mapa / cálculo
   const [from, setFrom] = useState<Pt | undefined>();
   const [to, setTo] = useState<Pt | undefined>();
   const [route, setRoute] = useState<LatLngExpression[]>([]);
-  const [calcStatus, setCalcStatus] = useState<"idle" | "loading" | "error">(
-    "idle"
-  );
+  const [calcStatus, setCalcStatus] = useState<"idle" | "loading" | "error">("idle");
   const [calcMsg, setCalcMsg] = useState("");
 
-  /* ====== Geocodificar automáticamente cuando escribís ====== */
+  /* Geocodificar al tipear */
   const debounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
@@ -135,7 +156,7 @@ export default function App() {
     };
   }, [origen, destino]);
 
-  /* ====== Calcular ruta (y km) cuando hay ambos puntos ====== */
+  /* Calcular ruta (y km) cuando hay ambos puntos */
   useEffect(() => {
     (async () => {
       if (from && to) {
@@ -158,7 +179,7 @@ export default function App() {
     })();
   }, [from, to]);
 
-  /* ====== Click en el mapa: primero origen, luego destino; ambos arrastrables ====== */
+  /* Clic en el mapa: primero origen, luego destino; arrastrables */
   const nextIsFrom = useMemo(() => !from || (from && to), [from, to]);
   function handleMapClick(e: L.LeafletMouseEvent) {
     const p = { lat: e.latlng.lat, lon: e.latlng.lng };
@@ -172,25 +193,41 @@ export default function App() {
     });
   }
 
-  /* ====== Precio ====== */
+  /* Descuento por anticipo (>= 24h) */
+  const anticipado = useMemo(() => {
+    if (!pickupAt) return false;
+    const when = new Date(pickupAt).getTime();
+    return when - Date.now() >= 24 * 60 * 60 * 1000;
+  }, [pickupAt]);
+
+  /* Precio */
   const precio = useMemo(() => {
     const kmNum = Math.max(0, Number(km) || 0);
     const v = VEHICLES[vehiculo];
-    const base = v.base + v.perKm * kmNum;
-    const extraAyudante = ayudante ? 3000 : 0;
-    const recargoFacturaA = facturaA ? base * 0.1 : 0;
-    const total = Math.round(base + extraAyudante + recargoFacturaA);
+    const cargoKm = v.perKm * kmNum;
+    const extraAyudante = ayudante ? 7500 : 0;
+
+    const subtotal = v.base + cargoKm + extraAyudante;
+    const descuentoAnticipo = anticipado ? subtotal * 0.1 : 0;
+
+    const baseParaFactura = subtotal - descuentoAnticipo;
+    const recargoFacturaA = facturaA ? baseParaFactura * 0.1 : 0;
+
+    const total = Math.round(baseParaFactura + recargoFacturaA);
+
     return {
       baseVehiculo: v.base,
       perKm: v.perKm,
       km: kmNum,
+      cargoKm,
       extraAyudante,
+      descuentoAnticipo,
       recargoFacturaA,
       total,
     };
-  }, [vehiculo, km, ayudante, facturaA]);
+  }, [vehiculo, km, ayudante, facturaA, anticipado]);
 
-  /* ====== WhatsApp ====== */
+  /* WhatsApp */
   function buildWhatsAppURL() {
     const v = VEHICLES[vehiculo];
     const lineas = [
@@ -200,14 +237,18 @@ export default function App() {
       `📦 Vehículo: ${v.label}`,
       `📍 Origen: ${origen || "—"}`,
       `🎯 Destino: ${destino || "—"}`,
+      `⏰ Reserva: ${formatDateTimeLocal(pickupAt)}`,
       `📏 Distancia: ${precio.km} km`,
       ayudante ? `🧑‍🔧 Con ayudante: Sí` : `🧑‍🔧 Con ayudante: No`,
       facturaA ? `🧾 Factura: A` : `🧾 Factura: B / C`,
+      anticipado ? `🏷️ Descuento por anticipo aplicado (10%)` : null,
       notas ? `📝 Notas: ${notas}` : null,
       "",
       `💰 Estimado: ${formatARS(precio.total)} (Base ${formatARS(
         precio.baseVehiculo
-      )} + ${formatARS(precio.perKm)} x km + extras)`,
+      )} + ${formatARS(precio.perKm)} x km + extras${anticipado ? " - 10% anticipo" : ""}${
+        facturaA ? " + recargo Factura A" : ""
+      })`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -253,6 +294,7 @@ export default function App() {
             <h2 className="text-xl font-semibold">Cotizá tu envío</h2>
 
             <div className="mt-5 grid gap-4 md:grid-cols-2">
+              {/* Nombre y Teléfono */}
               <div className="md:col-span-2">
                 <label className="mb-1 block text-sm font-medium">Nombre</label>
                 <input
@@ -262,11 +304,8 @@ export default function App() {
                   placeholder="Tu nombre"
                 />
               </div>
-
               <div>
-                <label className="mb-1 block text-sm font-medium">
-                  Teléfono (opcional)
-                </label>
+                <label className="mb-1 block text-sm font-medium">Teléfono (opcional)</label>
                 <input
                   value={telefono}
                   onChange={(e) => setTelefono(e.target.value)}
@@ -275,22 +314,40 @@ export default function App() {
                 />
               </div>
 
-              <div>
-                <label className="mb-1 block text-sm font-medium">Vehículo</label>
-                <select
-                  value={vehiculo}
-                  onChange={(e) => setVehiculo(e.target.value as VehicleKey)}
+              {/* Fecha y hora */}
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-sm font-medium">Fecha y hora de reserva</label>
+                <input
+                  type="datetime-local"
+                  min={nowLocalForInput()}
+                  value={pickupAt}
+                  onChange={(e) => setPickupAt(e.target.value)}
                   className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
-                >
-                  {Object.entries(VEHICLES).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v.label} — base {formatARS(v.base)} / {formatARS(v.perKm)} x
-                      km
-                    </option>
-                  ))}
-                </select>
+                />
+                <div className="mt-1 flex items-center gap-3 text-xs">
+                  <span className="text-gray-500">
+                    {pickupAt ? `Seleccionado: ${formatDateTimeLocal(pickupAt)}` : "Seleccioná día y hora"}
+                  </span>
+                  {anticipado && (
+                    <span className="rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700">
+                      10% OFF por reserva anticipada
+                    </span>
+                  )}
+                </div>
               </div>
 
+              {/* Vehículo (solo lectura; se elige en la barra lateral) */}
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-sm font-medium">Vehículo</label>
+                <div className="flex items-center justify-between rounded-xl border bg-gray-50 px-3 py-2">
+                  <span className="text-sm">
+                    {VEHICLES[vehiculo].label} — base {formatARS(VEHICLES[vehiculo].base)} / {formatARS(VEHICLES[vehiculo].perKm)} x km
+                  </span>
+                  <span className="text-xs text-gray-500">Elegilo en la barra lateral</span>
+                </div>
+              </div>
+
+              {/* Origen / Destino */}
               <div className="md:col-span-2">
                 <label className="mb-1 block text-sm font-medium">Origen</label>
                 <input
@@ -300,7 +357,6 @@ export default function App() {
                   placeholder="Dirección de retiro (calle, nro, ciudad)"
                 />
               </div>
-
               <div className="md:col-span-2">
                 <label className="mb-1 block text-sm font-medium">Destino</label>
                 <input
@@ -311,11 +367,9 @@ export default function App() {
                 />
               </div>
 
-              {/* Distancia (auto, editable si querés forzar) */}
+              {/* Distancia (auto, editable si hace falta) */}
               <div>
-                <label className="mb-1 block text-sm font-medium">
-                  Distancia estimada (km)
-                </label>
+                <label className="mb-1 block text-sm font-medium">Distancia estimada (km)</label>
                 <div className="relative">
                   <input
                     value={km}
@@ -328,21 +382,14 @@ export default function App() {
                     {calcStatus === "loading" ? "calculando…" : "auto"}
                   </span>
                 </div>
-                {calcStatus === "error" && (
-                  <p className="mt-1 text-xs text-amber-600">{calcMsg}</p>
-                )}
-                {calcStatus === "loading" && (
-                  <p className="mt-1 text-xs text-gray-500">{calcMsg}</p>
-                )}
+                {calcStatus === "error" && <p className="mt-1 text-xs text-amber-600">{calcMsg}</p>}
+                {calcStatus === "loading" && <p className="mt-1 text-xs text-gray-500">{calcMsg}</p>}
               </div>
 
-              {/* MAPA */}
+              {/* Mapa */}
               <div className="md:col-span-2 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">
-                    Hacé clic en el mapa para fijar origen y destino. Podés
-                    arrastrar los marcadores.
-                  </span>
+                  <span className="text-sm text-gray-600">Hacé clic en el mapa para fijar origen y destino. Podés arrastrar los marcadores.</span>
                   <button
                     type="button"
                     onClick={useMyLocation}
@@ -401,75 +448,70 @@ export default function App() {
                   <FitBounds from={from} to={to} />
                 </MapContainer>
               </div>
+
+              {/* Ayudante / Factura */}
+              <div className="flex items-center gap-6">
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={ayudante} onChange={(e) => setAyudante(e.target.checked)} className="h-4 w-4" />
+                  Necesito ayudante (+{formatARS(7500)})
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={facturaA} onChange={(e) => setFacturaA(e.target.checked)} className="h-4 w-4" />
+                  Factura A (+10%)
+                </label>
+              </div>
+
+              {/* Notas */}
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-sm font-medium">Notas (opcional)</label>
+                <input
+                  value={notas}
+                  onChange={(e) => setNotas(e.target.value)}
+                  className="w-full rounded-xl border px-3 py-2 outline-none focus:border-indigo-400"
+                  placeholder="Pisos, horarios, referencias…"
+                />
+              </div>
             </div>
 
             {/* RESUMEN */}
-            <div className="mt-6 rounded-xl border bg-gray-50 p-4 text-sm">
+            <div className="mt-6 rounded-2xl border bg-gray-50 p-4 text-sm">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="font-medium">Resumen:</span>
                 <span>Base vehículo: {formatARS(precio.baseVehiculo)}</span>
                 <span>•</span>
-                <span>
-                  {precio.km} km x {formatARS(precio.perKm)} ={" "}
-                  {formatARS(precio.perKm * precio.km)}
-                </span>
-                {ayudante && (
-                  <>
-                    <span>•</span>
-                    <span>Ayudante: {formatARS(precio.extraAyudante)}</span>
-                  </>
-                )}
-                {facturaA && (
-                  <>
-                    <span>•</span>
-                    <span>
-                      Recargo Factura A: {formatARS(precio.recargoFacturaA)}
-                    </span>
-                  </>
-                )}
-                <span className="ml-auto text-base font-semibold">
-                  Total: {formatARS(precio.total)}
-                </span>
+                <span>{precio.km} km x {formatARS(precio.perKm)} = {formatARS(precio.cargoKm)}</span>
+                {ayudante && (<><span>•</span><span>Ayudante: {formatARS(precio.extraAyudante)}</span></>)}
+                {anticipado && (<><span>•</span><span className="text-green-700">Descuento anticipo: -{formatARS(precio.descuentoAnticipo)}</span></>)}
+                {facturaA && (<><span>•</span><span>Recargo Factura A: {formatARS(precio.recargoFacturaA)}</span></>)}
+                <span className="ml-auto text-base font-semibold">Total: {formatARS(precio.total)}</span>
               </div>
             </div>
 
-            <div className="mt-4 flex gap-3">
+            {/* Acciones */}
+            <div className="mt-4 flex flex-wrap gap-3">
               <a
                 href={buildWhatsAppURL()}
                 target="_blank"
                 className={`inline-flex items-center justify-center rounded-xl px-5 py-2.5 text-white shadow ${
-                  canQuote
-                    ? "bg-indigo-600 hover:opacity-95"
-                    : "bg-gray-300 cursor-not-allowed"
+                  canQuote ? "bg-indigo-600 hover:opacity-95" : "bg-gray-300 cursor-not-allowed"
                 }`}
-                onClick={(e) => {
-                  if (!canQuote) e.preventDefault();
-                }}
+                onClick={(e) => { if (!canQuote) e.preventDefault(); }}
               >
                 Enviar pedido por WhatsApp
               </a>
               <button
                 className="rounded-xl border px-5 py-2.5 hover:border-indigo-400 hover:bg-indigo-50"
                 onClick={() => {
-                  setNombre("");
-                  setTelefono("");
-                  setOrigen("");
-                  setDestino("");
-                  setVehiculo("camioneta");
-                  setKm("5");
-                  setAyudante(false);
-                  setFacturaA(false);
-                  setNotas("");
-                  setFrom(undefined);
-                  setTo(undefined);
-                  setRoute([]);
-                  setCalcStatus("idle");
-                  setCalcMsg("");
+                  setNombre(""); setTelefono(""); setOrigen(""); setDestino("");
+                  setVehiculo("camioneta"); setKm("5"); setAyudante(false); setFacturaA(false); setNotas("");
+                  setPickupAt(""); setFrom(undefined); setTo(undefined); setRoute([]);
+                  setCalcStatus("idle"); setCalcMsg("");
                 }}
               >
                 Limpiar
               </button>
             </div>
+
             {!canQuote && (
               <p className="mt-2 text-xs text-amber-600">
                 Completá origen, destino y km para habilitar WhatsApp.
@@ -477,25 +519,72 @@ export default function App() {
             )}
           </div>
 
-          {/* Aside simple */}
+          {/* ASIDE: tarjetas de vehículos (solo Camioneta disponible) */}
           <aside className="space-y-4">
             <div className="rounded-2xl border bg-white p-5 shadow-sm">
-              <h3 className="font-semibold">Flota disponible</h3>
-              <ul className="mt-3 space-y-2 text-sm text-gray-700">
-                {Object.entries(VEHICLES).map(([k, v]) => (
-                  <li key={k} className="rounded-xl border bg-gray-50 p-3">
-                    <div className="flex items-center justify-between">
-                      <span>{v.label}</span>
-                      <span className="text-gray-500">
-                        Base {formatARS(v.base)} • {formatARS(v.perKm)}/km
-                      </span>
-                    </div>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Capacidad: {v.maxVolumen}
-                    </p>
-                  </li>
-                ))}
+              <h3 className="mb-2 font-semibold">Elegí tu vehículo</h3>
+
+              <ul className="grid gap-3">
+                {Object.entries(VEHICLES).map(([k, v]) => {
+                  const key = k as VehicleKey;
+                  const selected = vehiculo === key;
+                  const available = VEHICLE_AVAILABLE[key];
+
+                  return (
+                    <li
+                      key={k}
+                      className={`overflow-hidden rounded-2xl border bg-gray-50 transition ${
+                        selected ? "ring-2 ring-indigo-500 border-indigo-400" : "hover:border-indigo-300"
+                      } ${!available ? "opacity-60" : ""}`}
+                    >
+                      <button
+                        type="button"
+                        disabled={!available}
+                        aria-disabled={!available}
+                        onClick={() => {
+                          if (!available) return;
+                          setVehiculo(key);
+                        }}
+                        className={`flex w-full items-center gap-3 p-3 text-left ${
+                          !available ? "cursor-not-allowed" : ""
+                        }`}
+                        title={available ? `Seleccionar ${v.label}` : `${v.label} no disponible`}
+                      >
+                        <div className="relative h-16 w-24 overflow-hidden rounded-lg bg-white">
+                          <img
+                            src={VEHICLE_IMAGES[key]}
+                            alt={v.label}
+                            className="h-full w-full object-cover"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).src =
+                                "https://picsum.photos/seed/" + key + "/300/200";
+                            }}
+                          />
+                          {!available && (
+                            <span className="absolute right-1 top-1 rounded-full bg-gray-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
+                              No disponible
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium">{v.label}</span>
+                            <span className="text-xs text-gray-500">{v.maxVolumen}</span>
+                          </div>
+                          <div className="text-sm text-gray-600">
+                            Base {formatARS(v.base)} • {formatARS(v.perKm)}/km
+                          </div>
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
+
+              <p className="mt-3 text-xs text-gray-500">
+                Podés cargar tus fotos en <code>/public/images/</code> como: <code>moto.jpg</code>, <code>camioneta.jpg</code>, <code>camion.jpg</code>.
+              </p>
             </div>
           </aside>
         </div>
