@@ -1,9 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import "leaflet/dist/leaflet.css";
 import {
-  MapContainer, TileLayer, Marker, Polyline, useMap, Popup
+  MapContainer,
+  TileLayer,
+  Marker,
+  Polyline,
+  useMap,
+  Popup,
 } from "react-leaflet";
-import L from "leaflet";
-import type { LatLngExpression } from "leaflet";
+
+// Usar Leaflet como espacio de nombres (valor) y tipos aparte
+import * as L from "leaflet";
+import type { LatLngExpression, LeafletMouseEvent } from "leaflet";
 
 // ----- Fix de iconos en Vite -----
 import marker2x from "leaflet/dist/images/marker-icon-2x.png";
@@ -37,7 +45,7 @@ async function geocode(q: string): Promise<Pt> {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
     q
   )}`;
-  const res = await fetch(url, { headers: { "Accept": "application/json" } });
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
   const data = (await res.json()) as Array<{ lat: string; lon: string }>;
   if (!data.length) throw new Error("No se encontró la dirección");
   return { lat: +data[0].lat, lon: +data[0].lon };
@@ -66,11 +74,15 @@ export type MapPickerProps = {
 
 export default function MapPicker(props: MapPickerProps) {
   const { origenText, destinoText, onKmChange, onSetOrigenText, onSetDestinoText } = props;
+
   const [from, setFrom] = useState<Pt | undefined>();
   const [to, setTo] = useState<Pt | undefined>();
   const [route, setRoute] = useState<LatLngExpression[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [msg, setMsg] = useState("");
+
+  // Ref del mapa
+  const mapRef = useRef<L.Map | null>(null);
 
   // Geolocalización para setear origen rápido
   function setMyLocation() {
@@ -81,7 +93,7 @@ export default function MapPicker(props: MapPickerProps) {
     });
   }
 
-  // Geocode cuando cambian los textos
+  // Geocode cuando cambian los textos (con debounce)
   const debounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
@@ -95,7 +107,7 @@ export default function MapPicker(props: MapPickerProps) {
         setTo(nt);
         setStatus("idle");
         setMsg("");
-      } catch (e: any) {
+      } catch {
         setStatus("error");
         setMsg("No se pudo geocodificar alguna dirección.");
       }
@@ -117,7 +129,7 @@ export default function MapPicker(props: MapPickerProps) {
           onKmChange(r.km);
           setStatus("idle");
           setMsg("");
-        } catch (e) {
+        } catch {
           setStatus("error");
           setMsg("No se pudo calcular la ruta.");
           setRoute([]);
@@ -128,25 +140,32 @@ export default function MapPicker(props: MapPickerProps) {
     })();
   }, [from, to, onKmChange]);
 
-  // Click en el mapa: primero setea origen, luego destino (toggle)
+  // Click en el mapa: primero origen, luego destino (toggle)
   const nextIsFrom = useMemo(() => !from || (from && to), [from, to]);
 
-  function handleMapClick(e: L.LeafletMouseEvent) {
-    const p = { lat: e.latlng.lat, lon: e.latlng.lng };
-    if (nextIsFrom) {
-      setFrom(p);
-      onSetOrigenText?.(""); // opcional: limpiar texto si se clickeó en mapa
-    } else {
-      setTo(p);
-      onSetDestinoText?.("");
-    }
-  }
+  const handleMapClick = useCallback(
+    (e: LeafletMouseEvent) => {
+      const p = { lat: e.latlng.lat, lon: e.latlng.lng };
+      if (nextIsFrom) {
+        setFrom(p);
+        onSetOrigenText?.(""); // opcional: limpiar texto si se clickeó en mapa
+      } else {
+        setTo(p);
+        onSetDestinoText?.("");
+      }
+    },
+    [nextIsFrom, onSetDestinoText, onSetOrigenText]
+  );
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-sm text-gray-600">
-          {status === "loading" ? msg : status === "error" ? msg : "Hacé clic en el mapa para fijar origen/destino. Podés arrastrar los marcadores."}
+          {status === "loading"
+            ? msg
+            : status === "error"
+            ? msg
+            : "Hacé clic en el mapa para fijar origen/destino. Podés arrastrar los marcadores."}
         </span>
         <button
           type="button"
@@ -157,21 +176,21 @@ export default function MapPicker(props: MapPickerProps) {
         </button>
       </div>
 
-<MapContainer
-  center={[-27.3671, -55.8961]}
-  zoom={13}
-  style={{ height: 360, width: "100%", borderRadius: 16 }}
-  whenReady={() => {
-    const map = e.target; // tipo: L.Map
-    map.on("click", (ev: L.LeafletMouseEvent) => {
-      const p = { lat: ev.latlng.lat, lon: ev.latlng.lng };
-      if (!from || (from && to)) setFrom(p);
-      else setTo(p);
-    });
-  }}
->
+      <MapContainer
+        center={[-27.3671, -55.8961]}
+        zoom={13}
+        style={{ height: 360, width: "100%", borderRadius: 16 }}
+        ref={mapRef}
+        whenReady={() => {
+          const map = mapRef.current;
+          if (!map) return;
+          // Evitar listeners duplicados en HMR
+          map.off("click", handleMapClick);
+          map.on("click", handleMapClick);
+        }}
+      >
         <TileLayer
-          attribution='&copy; OpenStreetMap'
+          attribution="&copy; OpenStreetMap"
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
@@ -207,9 +226,7 @@ export default function MapPicker(props: MapPickerProps) {
           </Marker>
         )}
 
-        {!!route.length && (
-          <Polyline positions={route} />
-        )}
+        {!!route.length && <Polyline positions={route} />}
 
         <FitBounds from={from} to={to} />
       </MapContainer>
