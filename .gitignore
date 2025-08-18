@@ -5,6 +5,12 @@ node_modules/
 dist/
 dist-ssr/
 
+# Variables de entorno (IMPORTANTE: nunca subir APIs keys)
+.env
+.env.local
+.env.production
+.env.development
+
 # Logs
 logs
 *.log
@@ -27,3 +33,7 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Firebase
+.firebase/
+firebase-debug.log

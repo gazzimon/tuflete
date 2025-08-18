@@ -1,0 +1,22 @@
+{
+  "name": "TuFlete - Tu flete en minutos",
+  "short_name": "TuFlete",
+  "description": "Pedí tu flete en minutos. Servicio de transporte rápido y confiable.",
+  "theme_color": "#3b82f6",
+  "background_color": "#ffffff",
+  "display": "standalone",
+  "orientation": "portrait",
+  "scope": "/",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["business", "travel", "utilities"],
+  "lang": "es-AR",
+  "dir": "ltr"
+}

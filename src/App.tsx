@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, useMemo } from "react";
 import {
   useJsApiLoader,
   GoogleMap,
@@ -9,12 +9,23 @@ import {
 import DatePicker from "react-datepicker";
 import "react-datepicker/dist/react-datepicker.css";
 
+// Components
+import ThemeToggle from "./components/ThemeToggle";
+import LoadingSpinner from "./components/LoadingSpinner";
+import ToastContainer from "./components/ToastContainer";
+
+// Hooks
+import { useGoogleMaps } from "./hooks/useGoogleMaps";
+import { useFormValidation } from "./hooks/useFormValidation";
+import { useToast } from "./hooks/useToast";
+
+// Types
+import type { LatLng } from "./hooks/useGoogleMaps";
+
 type VehicleKey = "moto" | "camioneta" | "camion";
-type LatLng = { lat: number; lng: number };
-type RouteInfo = { distanceText?: string; durationText?: string };
 
 const MAP_CENTER: LatLng = { lat: -27.3621, lng: -55.9009 }; // Posadas
-const WA_NUMBER = "5493764876249"; // sin "+"
+const WA_NUMBER = import.meta.env.VITE_WHATSAPP_NUMBER || "5493764876249";
 
 const VEHICLE_AVAILABLE: Record<VehicleKey, boolean> = {
   moto: false,
@@ -44,7 +55,7 @@ function VehicleGallery({
 }) {
   const items: VehicleKey[] = ["moto", "camioneta", "camion"];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: ".75rem", width: "100%" }}>
+    <div className="grid grid-cols-3 gap-3 w-full">
       {items.map((key) => {
         const selected = value === key;
         const available = VEHICLE_AVAILABLE[key];
@@ -54,29 +65,37 @@ function VehicleGallery({
             type="button"
             onClick={() => available && onChange(key)}
             title={available ? VEHICLE_LABELS[key] : `${VEHICLE_LABELS[key]} (no disponible)`}
-            style={{
-              cursor: available ? "pointer" : "not-allowed",
-              border: selected ? "2px solid #2563eb" : "1px solid #e5e7eb",
-              borderRadius: 12,
-              overflow: "hidden",
-              background: selected ? "rgba(37,99,235,.08)" : "#fff",
-              boxShadow: selected ? "0 0 0 3px rgba(37,99,235,.15)" : "0 1px 3px rgba(0,0,0,.06)",
-              opacity: available ? 1 : 0.5,
-              padding: 0,
-            }}
+            className={`
+              group relative overflow-hidden rounded-xl transition-all duration-300 transform
+              ${available ? 'cursor-pointer hover:scale-105' : 'cursor-not-allowed opacity-50'}
+              ${selected 
+                ? 'ring-2 ring-primary-500 ring-offset-2 ring-offset-white dark:ring-offset-slate-900 shadow-lg shadow-primary-500/25' 
+                : 'card hover:shadow-md'
+              }
+            `}
           >
-            <div style={{ aspectRatio: "4 / 3", width: "100%", overflow: "hidden" }}>
+            <div className="aspect-[4/3] w-full overflow-hidden">
               <img
                 src={VEHICLE_IMAGES[key]}
                 alt={VEHICLE_LABELS[key]}
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110"
                 loading="lazy"
               />
+              {!available && (
+                <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                  <span className="text-white font-medium text-sm bg-black/70 px-3 py-1 rounded-full">
+                    Próximamente
+                  </span>
+                </div>
+              )}
             </div>
-            <div style={{ padding: ".6rem .8rem", textAlign: "center", fontWeight: 600 }}>
-              {VEHICLE_LABELS[key]}
-              {!available && <span style={{ marginLeft: 6, fontWeight: 500, fontSize: 12, color: "#6b7280" }}>(Pronto)</span>}
-              {selected && <span style={{ marginLeft: 8, fontSize: 12, color: "#2563eb" }}>✓</span>}
+            <div className="p-3 text-center">
+              <div className="flex items-center justify-center gap-2">
+                <span className="font-semibold text-sm">{VEHICLE_LABELS[key]}</span>
+                {selected && (
+                  <span className="text-primary-500 text-lg">✓</span>
+                )}
+              </div>
             </div>
           </button>
         );
@@ -86,8 +105,13 @@ function VehicleGallery({
 }
 
 export default function App() {
-  // Cargar Google Maps JS + Places
-  const { isLoaded } = useJsApiLoader({
+  // Custom hooks
+  const { directions, routeInfo, isCalculating, calculateRoute, clearRoute } = useGoogleMaps();
+  const { validateForm, getFieldError, clearErrors } = useFormValidation();
+  const { toasts, success, error, warning, removeToast } = useToast();
+
+  // Cargar Google Maps JS + Places con memoización
+  const { isLoaded, loadError } = useJsApiLoader({
     googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string,
     libraries: ["places"],
   });
@@ -103,13 +127,13 @@ export default function App() {
   const [origenLL, setOrigenLL] = useState<LatLng | null>(null);
   const [destinoLL, setDestinoLL] = useState<LatLng | null>(null);
 
-  // GMaps helpers
-  const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
-  const [routeInfo, setRouteInfo] = useState<RouteInfo>({});
+  // Estados de loading
   const [usingGeoloc, setUsingGeoloc] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   const acOrigenRef = useRef<google.maps.places.Autocomplete | null>(null);
   const acDestinoRef = useRef<google.maps.places.Autocomplete | null>(null);
+  
   const onLoadOrigen = useCallback((ac: google.maps.places.Autocomplete) => {
     ac.setFields(["place_id", "geometry", "formatted_address", "name"]);
     acOrigenRef.current = ac;
@@ -120,41 +144,30 @@ export default function App() {
     acDestinoRef.current = ac;
   }, []);
 
-  const maybeRoute = useCallback(
-    (recent?: LatLng, which?: "origen" | "destino") => {
-      const o = which === "origen" ? recent ?? origenLL : origenLL;
-      const d = which === "destino" ? recent ?? destinoLL : destinoLL;
-      if (!o || !d) return;
-
-      const service = new google.maps.DirectionsService();
-      service.route(
-        { origin: o, destination: d, travelMode: google.maps.TravelMode.DRIVING },
-        (res, status) => {
-          if (status === "OK" && res) {
-            setDirections(res);
-            const leg = res.routes?.[0]?.legs?.[0];
-            setRouteInfo({
-              distanceText: leg?.distance?.text,
-              durationText: leg?.duration?.text,
-            });
-          } else {
-            console.warn("Directions failed:", status);
-            setDirections(null);
-            setRouteInfo({});
-          }
-        }
-      );
-    },
-    [origenLL, destinoLL]
-  );
+  // Función optimizada para calcular ruta
+  const handleRouteCalculation = useCallback(async (
+    origin: LatLng, 
+    destination: LatLng
+  ) => {
+    try {
+      await calculateRoute(origin, destination);
+      success("Ruta calculada correctamente");
+    } catch (err) {
+      error("Error al calcular la ruta. Intentá de nuevo.");
+    }
+  }, [calculateRoute, success, error]);
 
   const pickFromAutocomplete = useCallback(
     (which: "origen" | "destino") => {
       const ac = which === "origen" ? acOrigenRef.current : acDestinoRef.current;
       if (!ac) return;
+      
       const place = ac.getPlace();
       const ll = place?.geometry?.location;
-      if (!ll) return;
+      if (!ll) {
+        warning("Seleccioná una dirección válida de la lista");
+        return;
+      }
 
       const coords = { lat: ll.lat(), lng: ll.lng() };
       const label = place.formatted_address || place.name || (which === "origen" ? "Origen" : "Destino");
@@ -163,43 +176,68 @@ export default function App() {
         setOrigenText(label);
         setOrigenLL(coords);
         setUsingGeoloc(false);
+        clearErrors();
+        
+        // Calcular ruta si ya hay destino
+        if (destinoLL) {
+          handleRouteCalculation(coords, destinoLL);
+        }
       } else {
         setDestinoText(label);
         setDestinoLL(coords);
+        clearErrors();
+        
+        // Calcular ruta si ya hay origen
+        if (origenLL) {
+          handleRouteCalculation(origenLL, coords);
+        }
       }
-      setTimeout(() => maybeRoute(coords, which), 0);
     },
-    [maybeRoute]
+    [origenLL, destinoLL, clearErrors, handleRouteCalculation, warning]
   );
 
-  const useMyLocation = () => {
+  const useMyLocation = useCallback(() => {
     if (!navigator.geolocation) {
-      alert("Tu navegador no soporta geolocalización.");
+      error("Tu navegador no soporta geolocalización.");
       return;
     }
+
+    setUsingGeoloc(true);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const ll = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setOrigenLL(ll);
         setOrigenText("Mi ubicación");
-        setUsingGeoloc(true);
-        maybeRoute(ll, "origen");
+        success("Ubicación obtenida correctamente");
+        
+        if (destinoLL) {
+          handleRouteCalculation(ll, destinoLL);
+        }
       },
-      () => alert("No pudimos acceder a tu ubicación.")
+      (err) => {
+        setUsingGeoloc(false);
+        if (err.code === err.PERMISSION_DENIED) {
+          error("Permiso de ubicación denegado. Permití el acceso para usar esta función.");
+        } else {
+          error("No pudimos acceder a tu ubicación. Intentá de nuevo.");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
     );
-  };
+  }, [destinoLL, handleRouteCalculation, success, error]);
 
-  const limpiar = () => {
+  const limpiar = useCallback(() => {
     setOrigenText("");
     setDestinoText("");
-    setFecha(null);               // ← Date|null
-    setVehiculo("camioneta");     // ← clave válida
+    setFecha(null);
+    setVehiculo("camioneta");
     setOrigenLL(null);
     setDestinoLL(null);
     setUsingGeoloc(false);
-    setDirections(null);
-    setRouteInfo({});
-  };
+    clearRoute();
+    clearErrors();
+    success("Formulario limpiado");
+  }, [clearRoute, clearErrors, success]);
 
   const buildSearchLink = (ll: LatLng | null) =>
     ll ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${ll.lat},${ll.lng}`)}` : "";
@@ -209,191 +247,338 @@ export default function App() {
       ? `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(`${o.lat},${o.lng}`)}&destination=${encodeURIComponent(`${d.lat},${d.lng}`)}&travelmode=driving`
       : "";
 
-  const reservarWhatsApp = () => {
-    if (!origenLL || !destinoLL) {
-      alert("Completá ORIGEN y DESTINO antes de enviar.");
+  const reservarWhatsApp = useCallback(async () => {
+    setIsSubmitting(true);
+    
+    const formData = {
+      origen: origenText,
+      destino: destinoText,
+      origenLL,
+      destinoLL,
+      vehiculo,
+      fecha
+    };
+
+    if (!validateForm(formData)) {
+      error("Por favor completá todos los campos requeridos");
+      setIsSubmitting(false);
       return;
     }
-    const origenLink = buildSearchLink(origenLL);
-    const destinoLink = buildSearchLink(destinoLL);
-    const rutaLink = buildDirectionsLink(origenLL, destinoLL);
 
-    const fechaTxt =
-      fecha
+    try {
+      const origenLink = buildSearchLink(origenLL);
+      const destinoLink = buildSearchLink(destinoLL);
+      const rutaLink = buildDirectionsLink(origenLL, destinoLL);
+
+      const fechaTxt = fecha
         ? fecha.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })
         : null;
 
-    const texto = [
-      "Hola, quiero reservar un flete 🚚",
-      `* Origen: ${origenText || "—"}`,
-      `  📍 ${origenLink}`,
-      `* Destino: ${destinoText || "—"}`,
-      `  📍 ${destinoLink}`,
-      fechaTxt ? `* Fecha/Hora: ${fechaTxt}` : null,
-      `* Vehículo: ${VEHICLE_LABELS[vehiculo]}`,
-      routeInfo.distanceText ? `* Distancia aprox.: ${routeInfo.distanceText}` : null,
-      routeInfo.durationText ? `* Duración aprox.: ${routeInfo.durationText}` : null,
-      rutaLink ? `* Ruta completa: ${rutaLink}` : null,
-      "",
-      "¿Me confirman disponibilidad y tarifa?",
-    ]
-      .filter(Boolean)
-      .join("\n");
+      const texto = [
+        "🚚 Hola, quiero reservar un flete",
+        "",
+        `📍 *Origen:* ${origenText}`,
+        `   ${origenLink}`,
+        "",
+        `🎯 *Destino:* ${destinoText}`,
+        `   ${destinoLink}`,
+        "",
+        fechaTxt ? `📅 *Fecha/Hora:* ${fechaTxt}` : null,
+        `🚛 *Vehículo:* ${VEHICLE_LABELS[vehiculo]}`,
+        routeInfo.distanceText ? `📏 *Distancia:* ${routeInfo.distanceText}` : null,
+        routeInfo.durationText ? `⏱️ *Duración:* ${routeInfo.durationText}` : null,
+        "",
+        rutaLink ? `🗺️ *Ver ruta completa:* ${rutaLink}` : null,
+        "",
+        "¿Me confirman disponibilidad y tarifa? 😊",
+      ]
+        .filter(Boolean)
+        .join("\n");
 
-    const base = WA_NUMBER ? `https://wa.me/${WA_NUMBER}?text=` : `https://wa.me/?text=`;
-    window.open(base + encodeURIComponent(texto), "_blank");
-  };
+      const base = WA_NUMBER ? `https://wa.me/${WA_NUMBER}?text=` : `https://wa.me/?text=`;
+      window.open(base + encodeURIComponent(texto), "_blank");
+      
+      success("Mensaje enviado a WhatsApp");
+    } catch (err) {
+      error("Error al generar el mensaje. Intentá de nuevo.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [
+    origenText, destinoText, origenLL, destinoLL, vehiculo, fecha,
+    validateForm, routeInfo, success, error
+  ]);
 
-  if (!isLoaded) return <p>Cargando mapa...</p>;
+  // Mostrar errores de carga
+  if (loadError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <p className="text-xl text-red-600">Error al cargar Google Maps</p>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="btn btn-primary"
+          >
+            Reintentar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isLoaded) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <LoadingSpinner size="lg" message="Cargando Google Maps..." />
+      </div>
+    );
+  }
 
   return (
-    <main style={{ maxWidth: 920, margin: "0 auto", padding: "1rem" }}>
-      <header>
-        <h1 style={{ marginBottom: 4 }}>TuFlete</h1>
-        <p style={{ marginTop: 0, opacity: 0.8 }}>Pedí tu flete en minutos</p>
-      </header>
+    <>
+      <ThemeToggle />
+      <ToastContainer toasts={toasts} onRemoveToast={removeToast} />
+      
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 transition-all duration-700">
+        <main className="max-w-4xl mx-auto px-4 py-8 space-y-8 animate-fade-in">
+          {/* Header */}
+          <header className="text-center space-y-2">
+            <h1 className="text-5xl font-bold bg-gradient-to-r from-primary-600 to-blue-600 bg-clip-text text-transparent">
+              TuFlete
+            </h1>
+            <p className="text-xl text-slate-600 dark:text-slate-300">
+              Pedí tu flete en minutos ⚡
+            </p>
+          </header>
 
+          {/* Form Card */}
+          <div className="card p-6 space-y-6 animate-slide-up">
+            {/* Origen */}
+            <div className="relative">
+              <label className="block text-sm font-medium mb-2 text-slate-700 dark:text-slate-300">
+                📍 Origen
+              </label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-xl z-10">
+                  📍
+                </span>
+                <Autocomplete 
+                  onLoad={onLoadOrigen} 
+                  onPlaceChanged={() => pickFromAutocomplete("origen")}
+                >
+                  <input
+                    value={origenText}
+                    onChange={(e) => {
+                      setOrigenText(e.target.value);
+                      if (usingGeoloc) setUsingGeoloc(false);
+                    }}
+                    placeholder="Ingresá tu dirección de origen..."
+                    autoComplete="off"
+                    className={`input-field pl-12 pr-12 ${getFieldError('origen') ? 'border-red-500' : ''}`}
+                  />
+                </Autocomplete>
+                {!usingGeoloc && (
+                  <button
+                    onClick={useMyLocation}
+                    title="Usar mi ubicación"
+                    className="absolute right-3 top-1/2 transform -translate-y-1/2 p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                  >
+                    <span className="text-xl">📌</span>
+                  </button>
+                )}
+              </div>
+              {getFieldError('origen') && (
+                <p className="text-sm text-red-600 mt-1">{getFieldError('origen')}</p>
+              )}
+            </div>
 
-{/* Origen */}
-<div style={{ position: "relative", width: "100%", marginTop: "1rem" }}>
-  <span
-    style={{
-      position: "absolute",
-      left: ".8rem",
-      top: "50%",
-      transform: "translateY(-50%)",
-      fontSize: "1.2rem",
-    }}
-  >
-    📍
-  </span>
-  <Autocomplete onLoad={onLoadOrigen} onPlaceChanged={() => pickFromAutocomplete("origen")}>
-    <input
-      value={origenText}
-      onChange={(e) => {
-        setOrigenText(e.target.value);
-        if (usingGeoloc) setUsingGeoloc(false);
-      }}
-      placeholder="Origen (calle, ciudad…)"
-      autoComplete="off"
-      style={{
-        width: "100%",
-        fontSize: "1.05rem",
-        padding: ".85rem 2.5rem .85rem 2.5rem", // deja espacio a izquierda y derecha
-        borderRadius: "8px",
-      }}
-    />
-  </Autocomplete>
-  {!usingGeoloc && (
-    <button
-      onClick={useMyLocation}
-      title="Usar mi ubicación"
-      style={{
-        position: "absolute",
-        right: ".5rem",
-        top: "50%",
-        transform: "translateY(-50%)",
-        border: "none",
-        background: "transparent",
-        cursor: "pointer",
-        fontSize: "1.2rem",
-      }}
-    >
-      📌
-    </button>
-  )}
-</div>
+            {/* Destino */}
+            <div className="relative">
+              <label className="block text-sm font-medium mb-2 text-slate-700 dark:text-slate-300">
+                🎯 Destino
+              </label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-xl z-10">
+                  🎯
+                </span>
+                <Autocomplete 
+                  onLoad={onLoadDestino} 
+                  onPlaceChanged={() => pickFromAutocomplete("destino")}
+                >
+                  <input
+                    value={destinoText}
+                    onChange={(e) => setDestinoText(e.target.value)}
+                    placeholder="¿A dónde querés que llevemos tu carga?"
+                    autoComplete="off"
+                    className={`input-field pl-12 pr-12 ${getFieldError('destino') ? 'border-red-500' : ''}`}
+                  />
+                </Autocomplete>
+                <button
+                  onClick={limpiar}
+                  title="Limpiar formulario"
+                  className="absolute right-3 top-1/2 transform -translate-y-1/2 p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                >
+                  <span className="text-xl">🧹</span>
+                </button>
+              </div>
+              {getFieldError('destino') && (
+                <p className="text-sm text-red-600 mt-1">{getFieldError('destino')}</p>
+              )}
+            </div>
 
-{/* Destino */}
-<div style={{ position: "relative", width: "100%", marginTop: ".75rem" }}>
-  <span
-    style={{
-      position: "absolute",
-      left: ".8rem",
-      top: "50%",
-      transform: "translateY(-50%)",
-      fontSize: "1.2rem",
-    }}
-  >
-    🎯
-  </span>
-  <Autocomplete onLoad={onLoadDestino} onPlaceChanged={() => pickFromAutocomplete("destino")}>
-    <input
-      value={destinoText}
-      onChange={(e) => setDestinoText(e.target.value)}
-      placeholder="Destino (calle, ciudad…)"
-      autoComplete="off"
-      style={{
-        width: "100%",
-        fontSize: "1.05rem",
-        padding: ".85rem 2.5rem .85rem 2.5rem",
-        borderRadius: "8px",
-      }}
-    />
-  </Autocomplete>
-  <button
-    onClick={limpiar}
-    title="Limpiar"
-    style={{
-      position: "absolute",
-      right: ".5rem",
-      top: "50%",
-      transform: "translateY(-50%)",
-      border: "none",
-      background: "transparent",
-      cursor: "pointer",
-      fontSize: "1.2rem",
-    }}
-  >
-    🧹
-  </button>
-</div>
+            {/* Mapa */}
+            <div className="space-y-4">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                🗺️ Ruta {isCalculating && <span className="text-primary-500">(Calculando...)</span>}
+              </label>
+              <div className="rounded-2xl overflow-hidden shadow-lg ring-1 ring-slate-200 dark:ring-slate-700">
+                <GoogleMap
+                  mapContainerStyle={{ height: "400px", width: "100%" }}
+                  center={destinoLL || origenLL || MAP_CENTER}
+                  zoom={destinoLL && origenLL ? 12 : 13}
+                  options={{
+                    mapTypeControl: false,
+                    streetViewControl: false,
+                    fullscreenControl: false,
+                    zoomControl: true,
+                    styles: [
+                      {
+                        featureType: "poi",
+                        elementType: "labels",
+                        stylers: [{ visibility: "off" }]
+                      }
+                    ]
+                  }}
+                >
+                  {origenLL && (
+                    <Marker 
+                      position={origenLL} 
+                      label={{ text: "A", color: "white", fontWeight: "bold" }}
+                      title="Origen" 
+                      icon={{
+                        url: "data:image/svg+xml;charset=UTF-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2316a34a'><path d='M12 2C8.14 2 5 5.14 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.86-3.14-7-7-7z'/></svg>",
+                        scaledSize: new google.maps.Size(40, 40)
+                      }}
+                    />
+                  )}
+                  {destinoLL && (
+                    <Marker 
+                      position={destinoLL} 
+                      label={{ text: "B", color: "white", fontWeight: "bold" }}
+                      title="Destino"
+                      icon={{
+                        url: "data:image/svg+xml;charset=UTF-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23dc2626'><path d='M12 2C8.14 2 5 5.14 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.86-3.14-7-7-7z'/></svg>",
+                        scaledSize: new google.maps.Size(40, 40)
+                      }}
+                    />
+                  )}
+                  {directions && (
+                    <DirectionsRenderer 
+                      directions={directions} 
+                      options={{ 
+                        suppressMarkers: true,
+                        polylineOptions: {
+                          strokeColor: "#3b82f6",
+                          strokeWeight: 5,
+                          strokeOpacity: 0.8
+                        }
+                      }} 
+                    />
+                  )}
+                </GoogleMap>
+              </div>
+            </div>
 
-      {/* Mapa */}
-      <div style={{ marginTop: ".9rem" }}>
-        <GoogleMap
-          mapContainerStyle={{ height: "360px", width: "100%", borderRadius: "12px" }}
-          center={destinoLL || MAP_CENTER}
-          zoom={13}
-          options={{
-            mapTypeControl: false,
-            streetViewControl: false,
-            fullscreenControl: false,
-          }}
-        >
+            {/* Información de la ruta */}
+            {(routeInfo.distanceText || routeInfo.durationText) && (
+              <div className="bg-gradient-to-r from-primary-50 to-blue-50 dark:from-primary-900/20 dark:to-blue-900/20 rounded-xl p-4 space-y-2 border border-primary-100 dark:border-primary-800/30">
+                <h3 className="font-semibold text-primary-800 dark:text-primary-200 flex items-center gap-2">
+                  <span>📊</span> Información del viaje
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                  {routeInfo.distanceText && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-primary-600 dark:text-primary-400">📏</span>
+                      <span className="font-medium">Distancia:</span>
+                      <span>{routeInfo.distanceText}</span>
+                    </div>
+                  )}
+                  {routeInfo.durationText && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-primary-600 dark:text-primary-400">⏱️</span>
+                      <span className="font-medium">Duración:</span>
+                      <span>{routeInfo.durationText}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
-          {origenLL && <Marker position={origenLL} label="A" title="Origen" />}
-          {destinoLL && <Marker position={destinoLL} label="B" title="Destino" />}
-          {directions && <DirectionsRenderer directions={directions} options={{ suppressMarkers: true }} />}
-        </GoogleMap>
+            {/* Opciones de flete */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Vehículo */}
+              <div className="space-y-4">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                  🚚 Tipo de vehículo
+                </label>
+                <VehicleGallery value={vehiculo} onChange={setVehiculo} />
+              </div>
+
+              {/* Fecha y hora */}
+              <div className="space-y-4">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                  📅 Fecha y hora (opcional)
+                </label>
+                <DatePicker
+                  selected={fecha}
+                  onChange={(date) => setFecha(date)}
+                  showTimeSelect
+                  timeFormat="HH:mm"
+                  timeIntervals={15}
+                  dateFormat="dd/MM/yyyy HH:mm"
+                  placeholderText="¿Cuándo necesitás el flete?"
+                  className="w-full"
+                  minDate={new Date()}
+                  timeCaption="Hora"
+                />
+                {getFieldError('fecha') && (
+                  <p className="text-sm text-red-600">{getFieldError('fecha')}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Botón de WhatsApp */}
+            <div className="pt-4">
+              <button 
+                onClick={reservarWhatsApp} 
+                disabled={!origenLL || !destinoLL || isSubmitting}
+                className="btn btn-primary w-full text-lg py-4 relative overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span className="relative z-10 flex items-center justify-center gap-3">
+                  {isSubmitting ? (
+                    <>
+                      <div className="animate-spin w-5 h-5 border-2 border-white border-t-transparent rounded-full"></div>
+                      Enviando...
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-2xl">💬</span>
+                      Reservar por WhatsApp
+                    </>
+                  )}
+                </span>
+                <div className="absolute inset-0 bg-gradient-to-r from-green-500 to-green-600 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+              </button>
+              
+              {(!origenLL || !destinoLL) && (
+                <p className="text-sm text-amber-600 dark:text-amber-400 mt-2 text-center">
+                  ⚠️ Completá origen y destino para continuar
+                </p>
+              )}
+            </div>
+          </div>
+        </main>
       </div>
-
-      {/* Vehículo + Fecha + WhatsApp */}
-      <div style={{ marginTop: ".9rem", display: "flex", gap: ".5rem", alignItems: "center", flexWrap: "wrap" }}>
-        <div style={{ width: "50%", minWidth: 280 }}>
-          <VehicleGallery value={vehiculo} onChange={setVehiculo} />
-        </div>
-
-        <DatePicker
-          selected={fecha}
-          onChange={(date) => setFecha(date)}
-          showTimeSelect
-          timeFormat="HH:mm"
-          timeIntervals={15}
-          dateFormat="dd/MM/yyyy HH:mm"
-          placeholderText="Selecciona fecha y hora"
-          className="button"
-        />
-
-        <button onClick={reservarWhatsApp} className="button primary">✉️ Reservar por WhatsApp</button>
-      </div>
-
-      {(routeInfo.distanceText || routeInfo.durationText) && (
-        <p style={{ marginTop: ".5rem", opacity: 0.85 }}>
-          {routeInfo.distanceText ? `Distancia aprox.: ${routeInfo.distanceText} · ` : ""}
-          {routeInfo.durationText ? `Duración aprox.: ${routeInfo.durationText}` : ""}
-        </p>
-      )}
-    </main>
+    </>
   );
 }
