@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useMemo } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   useJsApiLoader,
   GoogleMap,
@@ -241,11 +241,7 @@ export default function App() {
 
   const buildSearchLink = (ll: LatLng | null) =>
     ll ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${ll.lat},${ll.lng}`)}` : "";
-
-  const buildDirectionsLink = (o: LatLng | null, d: LatLng | null) =>
-    o && d
-      ? `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(`${o.lat},${o.lng}`)}&destination=${encodeURIComponent(`${d.lat},${d.lng}`)}&travelmode=driving`
-      : "";
+;
 
   const reservarWhatsApp = useCallback(async () => {
     setIsSubmitting(true);
@@ -268,29 +264,25 @@ export default function App() {
     try {
       const origenLink = buildSearchLink(origenLL);
       const destinoLink = buildSearchLink(destinoLL);
-      const rutaLink = buildDirectionsLink(origenLL, destinoLL);
 
       const fechaTxt = fecha
         ? fecha.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })
         : null;
 
       const texto = [
-        "🚚 Hola, quiero reservar un flete",
+        "Hola, quiero reservar un flete",
         "",
-        `📍 *Origen:* ${origenText}`,
+        `*Origen:* ${origenText}`,
         `   ${origenLink}`,
         "",
-        `🎯 *Destino:* ${destinoText}`,
+        `*Destino:* ${destinoText}`,
         `   ${destinoLink}`,
         "",
-        fechaTxt ? `📅 *Fecha/Hora:* ${fechaTxt}` : null,
-        `🚛 *Vehículo:* ${VEHICLE_LABELS[vehiculo]}`,
-        routeInfo.distanceText ? `📏 *Distancia:* ${routeInfo.distanceText}` : null,
-        routeInfo.durationText ? `⏱️ *Duración:* ${routeInfo.durationText}` : null,
-        "",
-        rutaLink ? `🗺️ *Ver ruta completa:* ${rutaLink}` : null,
-        "",
-        "¿Me confirman disponibilidad y tarifa? 😊",
+        fechaTxt ? `*Fecha/Hora:* ${fechaTxt}` : null,
+        `*Vehículo:* ${VEHICLE_LABELS[vehiculo]}`,
+        routeInfo.distanceText ? `*Distancia:* ${routeInfo.distanceText}` : null,
+        routeInfo.durationText ? `*Duración:* ${routeInfo.durationText}` : null,
+        "¿Me confirman disponibilidad y tarifa?",
       ]
         .filter(Boolean)
         .join("\n");
