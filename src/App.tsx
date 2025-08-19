@@ -218,10 +218,9 @@ export default function App() {
     const destinoLink = buildSearchLink(destinoLL);
     const rutaLink = buildDirectionsLink(origenLL, destinoLL);
 
-    const fechaTxt =
-      fecha
-        ? fecha.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })
-        : null;
+    const fechaTxt = fecha
+  ? fecha.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })
+  : null;
 
     const texto = [
       "Hola, quiero reservar un flete 🚚",
@@ -229,16 +228,17 @@ export default function App() {
       `  📍 ${origenLink}`,
       `* Destino: ${destinoText || "—"}`,
       `  📍 ${destinoLink}`,
-      fechaTxt ? `* Fecha/Hora: ${fechaTxt}` : null,
+      `* Fecha/Hora: ${fechaTxt || "—"}`,   // siempre aparece
       `* Vehículo: ${VEHICLE_LABELS[vehiculo]}`,
       routeInfo.distanceText ? `* Distancia aprox.: ${routeInfo.distanceText}` : null,
       routeInfo.durationText ? `* Duración aprox.: ${routeInfo.durationText}` : null,
-      rutaLink ? `* Ruta completa: ${rutaLink}` : null,
+      rutaLink ? `* Ruta: Ver en Google Maps\n${rutaLink}` : null,
       "",
       "¿Me confirman disponibilidad y tarifa?",
     ]
       .filter(Boolean)
       .join("\n");
+
 
     const base = WA_NUMBER ? `https://wa.me/${WA_NUMBER}?text=` : `https://wa.me/?text=`;
     window.open(base + encodeURIComponent(texto), "_blank");
